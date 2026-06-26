@@ -34,11 +34,21 @@ TP_PERCENT     = 1.0     # Take profit %
 
 # ─── BINANCE CLIENT ───────────────────────────────────────────────
 if TESTNET:
-    client = Client(BINANCE_API_KEY, BINANCE_SECRET, testnet=True)
+    client = Client(
+        BINANCE_API_KEY, 
+        BINANCE_SECRET, 
+        testnet=True,
+        tld='vision'
+    )
     client.API_URL = "https://testnet.binance.vision/api"
+    client.MARGIN_API_URL = "https://testnet.binance.vision/api"
 else:
     client = Client(BINANCE_API_KEY, BINANCE_SECRET)
 
+try:
+    client.ping()
+except Exception as e:
+    logger.warning(f"Binance ping failed: {e}")
 # ─── STRATEGY FUNCTIONS ───────────────────────────────────────────
 
 def get_klines(symbol: str, limit: int = 100) -> pd.DataFrame:
