@@ -45,10 +45,6 @@ if TESTNET:
 else:
     client = Client(BINANCE_API_KEY, BINANCE_SECRET)
 
-try:
-    client.ping()
-except Exception as e:
-    logger.warning(f"Binance ping failed: {e}")
 # ─── STRATEGY FUNCTIONS ───────────────────────────────────────────
 
 def get_klines(symbol: str, limit: int = 100) -> pd.DataFrame:
