@@ -1,0 +1,446 @@
+import { useState, useEffect, useCallback } from "react";
+
+const COINS = [
+  { id: "bitcoin",          symbol: "BTC"   },
+  { id: "ethereum",         symbol: "ETH"   },
+  { id: "binancecoin",      symbol: "BNB"   },
+  { id: "solana",           symbol: "SOL"   },
+  { id: "ripple",           symbol: "XRP"   },
+  { id: "cardano",          symbol: "ADA"   },
+  { id: "dogecoin",         symbol: "DOGE"  },
+  { id: "polkadot",         symbol: "DOT"   },
+  { id: "matic-network",    symbol: "MATIC" },
+  { id: "chainlink",        symbol: "LINK"  },
+  { id: "avalanche-2",      symbol: "AVAX"  },
+  { id: "uniswap",          symbol: "UNI"   },
+  { id: "cosmos",           symbol: "ATOM"  },
+  { id: "litecoin",         symbol: "LTC"   },
+  { id: "tron",             symbol: "TRX"   },
+  { id: "filecoin",         symbol: "FIL"   },
+  { id: "aptos",            symbol: "APT"   },
+  { id: "arbitrum",         symbol: "ARB"   },
+  { id: "optimism",         symbol: "OP"    },
+  { id: "near",             symbol: "NEAR"  },
+];
+
+function calcRSI(prices, period = 14) {
+  if (prices.length < period + 1) return 50;
+  let gains = 0, losses = 0;
+  for (let i = prices.length - period; i < prices.length; i++) {
+    const d = prices[i] - prices[i - 1];
+    if (d > 0) gains += d; else losses -= d;
+  }
+  const ag = gains / period, al = losses / period;
+  if (al === 0) return 100;
+  return 100 - 100 / (1 + ag / al);
+}
+
+function calcMACD(prices) {
+  if (prices.length < 26) return { hist: 0 };
+  const ema = (arr, span) => {
+    const k = 2 / (span + 1);
+    let e = arr[0];
+    for (let i = 1; i < arr.length; i++) e = arr[i] * k + e * (1 - k);
+    return e;
+  };
+  const fast = ema(prices, 12), slow = ema(prices, 26);
+  const line = fast - slow;
+  return { hist: line * 0.3 };
+}
+
+function calcSR(prices) {
+  const resistance = Math.max(...prices.slice(-20)) * 0.99;
+  const support    = Math.min(...prices.slice(-20)) * 1.01;
+  return { support, resistance };
+}
+
+function calcMA(prices, p) {
+  const sl = prices.slice(-p);
+  return sl.reduce((a, b) => a + b, 0) / sl.length;
+}
+
+function analyze(prices) {
+  if (!prices || prices.length < 30) return { signal: "WAIT", score: 0, rsi: 50, signals: {} };
+  const curr = prices[prices.length - 1];
+  const rsi  = calcRSI(prices);
+  const macd = calcMACD(prices);
+  const { support, resistance } = calcSR(prices);
+  const ma20  = calcMA(prices, Math.min(20, prices.length));
+  const ma50  = calcMA(prices, Math.min(50, prices.length));
+  const ma200 = calcMA(prices, Math.min(200, prices.length));
+
+  const rsiSig  = rsi < 35 ? 1 : rsi > 65 ? -1 : 0;
+  const macdSig = macd.hist > 0 ? 1 : macd.hist < 0 ? -1 : 0;
+  const srRange = resistance - support;
+  const srSig   = srRange > 0 ? (curr < support + srRange * 0.15 ? 1 : curr > resistance - srRange * 0.15 ? -1 : 0) : 0;
+  const prev    = prices[prices.length - 2];
+  const patSig  = curr > prev * 1.003 ? 1 : curr < prev * 0.997 ? -1 : 0;
+  const maSig   = (curr > ma20 && ma20 > ma50) ? 1 : (curr < ma20 && ma20 < ma50) ? -1 : 0;
+  const trend   = curr > ma200 ? 1 : -1;
+
+  let buy  = [rsiSig, macdSig, srSig, patSig, maSig].filter(s => s === 1).length;
+  let sell = [rsiSig, macdSig, srSig, patSig, maSig].filter(s => s === -1).length;
+  if (trend === 1) buy  = Math.min(5, buy + 1);
+  if (trend === -1) sell = Math.min(5, sell + 1);
+
+  const signal = buy >= 3 ? "BUY" : sell >= 3 ? "SELL" : "WAIT";
+  const score  = signal === "BUY" ? buy : signal === "SELL" ? sell : Math.max(buy, sell);
+
+  return {
+    signal, score: Math.min(5, Math.round(score)),
+    rsi: rsi.toFixed(1),
+    support: support.toFixed(4),
+    resistance: resistance.toFixed(4),
+    ma20: ma20.toFixed(4),
+    ma50: ma50.toFixed(4),
+    signals: { RSI: rsiSig, MACD: macdSig, "S/R": srSig, Pattern: patSig, MA: maSig },
+  };
+}
+
+function MiniChart({ prices, signal }) {
+  if (!prices || prices.length < 2) return null;
+  const w = 200, h = 36;
+  const min = Math.min(...prices), max = Math.max(...prices);
+  const range = max - min || 1;
+  const pts = prices.map((p, i) => {
+    const x = (i / (prices.length - 1)) * w;
+    const y = h - ((p - min) / range) * (h - 4) - 2;
+    return `${x},${y}`;
+  }).join(" ");
+  const color = signal === "BUY" ? "#10b981" : signal === "SELL" ? "#ef4444" : "#4a6080";
+  return (
+    <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
+      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+async function sendTelegramMsg(token, chatId, text) {
+  const url = `https://api.telegram.org/bot${token}/sendMessage`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text, parse_mode: "Markdown" }),
+  });
+  return res.json();
+}
+
+export default function App() {
+  const [coinMap, setCoinMap]       = useState({});
+  const [history, setHistory]       = useState([]);
+  const [filter, setFilter]         = useState("ALL");
+  const [tab, setTab]               = useState("signals");
+  const [selected, setSelected]     = useState(null);
+  const [scanning, setScanning]     = useState(false);
+  const [toast, setToast]           = useState("");
+  const [tgToken, setTgToken]       = useState(localStorage.getItem("tgToken") || "");
+  const [tgChatId, setTgChatId]     = useState(localStorage.getItem("tgChatId") || "");
+  const [tgStatus, setTgStatus]     = useState("");
+  const [lastScan, setLastScan]     = useState("--:--");
+  const [autoMin, setAutoMin]       = useState(15);
+  const [priceHistory, setPriceHistory] = useState({});
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 3000); };
+
+  const fetchAndAnalyze = useCallback(async () => {
+    setScanning(true);
+    try {
+      const ids = COINS.map(c => c.id).join(",");
+      const url = `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${ids}&order=market_cap_desc&per_page=20&page=1&sparkline=true&price_change_percentage=1h,24h`;
+      const res  = await fetch(url);
+      const data = await res.json();
+
+      const newMap = {};
+      const newPH  = { ...priceHistory };
+
+      for (const coin of data) {
+        const sym    = COINS.find(c => c.id === coin.id)?.symbol || coin.symbol.toUpperCase();
+        const spark  = coin.sparkline_in_7d?.price || [];
+        const prices = spark.length > 0 ? spark : [coin.current_price];
+
+        if (!newPH[sym]) newPH[sym] = [];
+        newPH[sym] = [...newPH[sym], coin.current_price].slice(-200);
+
+        const allPrices = newPH[sym].length >= 30 ? newPH[sym] : prices;
+        const analysis  = analyze(allPrices);
+
+        newMap[sym] = {
+          symbol:    sym,
+          name:      coin.name,
+          price:     coin.current_price,
+          change24:  coin.price_change_percentage_24h?.toFixed(2) || "0.00",
+          change1h:  coin.price_change_percentage_1h_in_currency?.toFixed(2) || "0.00",
+          volume:    coin.total_volume,
+          mcap:      coin.market_cap,
+          sparkline: prices.slice(-30),
+          ...analysis,
+        };
+      }
+
+      setCoinMap(newMap);
+      setPriceHistory(newPH);
+      setLastScan(new Date().toLocaleTimeString());
+
+      // Signal history + Telegram
+      const newSigs = Object.values(newMap).filter(c => c.signal !== "WAIT");
+      for (const coin of newSigs) {
+        const priceStr = coin.price > 100 ? coin.price.toFixed(2) : coin.price > 1 ? coin.price.toFixed(4) : coin.price.toFixed(6);
+        const emoji    = coin.signal === "BUY" ? "🟢" : "🔴";
+        const indLines = Object.entries(coin.signals || {})
+          .map(([k, v]) => `  ${k}: ${v === 1 ? "✅" : v === -1 ? "❌" : "⚪"}`)
+          .join("\n");
+
+        setHistory(prev => {
+          const exists = prev.find(h => h.symbol === coin.symbol && h.signal === coin.signal && h.time === new Date().toLocaleTimeString().slice(0,5));
+          if (exists) return prev;
+          const entry = { symbol: coin.symbol, signal: coin.signal, price: priceStr, score: coin.score, time: new Date().toLocaleTimeString() };
+          const updated = [entry, ...prev].slice(0, 30);
+
+          // Send Telegram
+          if (tgToken && tgChatId) {
+            const msg = `${emoji} *${coin.signal} SIGNAL* — \`${coin.symbol}/USDT\`\n━━━━━━━━━━━━━━━\n💰 Price: \`$${priceStr}\`\n⭐ Score: \`${coin.score}/5\`\n\n📊 *Indicators:*\n${indLines}\n\n📈 Support: \`$${coin.support}\`\n📉 Resistance: \`$${coin.resistance}\`\n⏰ ${new Date().toLocaleTimeString()}`;
+            sendTelegramMsg(tgToken, tgChatId, msg).catch(() => {});
+          }
+          return updated;
+        });
+      }
+
+      const buys  = Object.values(newMap).filter(c => c.signal === "BUY").length;
+      const sells = Object.values(newMap).filter(c => c.signal === "SELL").length;
+      showToast(`✅ Scan complete — ${buys} BUY, ${sells} SELL`);
+    } catch (e) {
+      showToast("❌ API Error — try again");
+    }
+    setScanning(false);
+  }, [tgToken, tgChatId, priceHistory]);
+
+  // Auto scan
+  useEffect(() => {
+    fetchAndAnalyze();
+    if (autoMin > 0) {
+      const t = setInterval(fetchAndAnalyze, autoMin * 60 * 1000);
+      return () => clearInterval(t);
+    }
+  }, [autoMin]);
+
+  const testTelegram = async () => {
+    localStorage.setItem("tgToken", tgToken);
+    localStorage.setItem("tgChatId", tgChatId);
+    setTgStatus("Sending...");
+    try {
+      const r = await sendTelegramMsg(tgToken, tgChatId, "✅ *CryptoSignal Pro Connected!*\n\nReal-time signals will appear here! 🚀");
+      if (r.ok) setTgStatus("✅ Connected!");
+      else setTgStatus("❌ " + r.description);
+    } catch { setTgStatus("❌ Failed — check token"); }
+  };
+
+  const coins     = Object.values(coinMap);
+  const filtered  = coins.filter(c => filter === "ALL" || c.signal === filter);
+  const buys      = coins.filter(c => c.signal === "BUY").length;
+  const sells     = coins.filter(c => c.signal === "SELL").length;
+  const sel       = selected ? coinMap[selected] : null;
+
+  const fmt = (p) => !p ? "0" : p > 1000 ? p.toLocaleString("en", {maximumFractionDigits:2}) : p > 1 ? p.toFixed(4) : p.toFixed(6);
+  const sigColor = (s) => s === "BUY" ? "#10b981" : s === "SELL" ? "#ef4444" : "#4a6080";
+  const indLabel = (v) => v === 1 ? "▲ BULL" : v === -1 ? "▼ BEAR" : "— NEUT";
+  const indColor = (v) => v === 1 ? "#10b981" : v === -1 ? "#ef4444" : "#4a6080";
+
+  return (
+    <div style={{ background:"#080b14", color:"#e2e8f0", fontFamily:"'Space Grotesk',sans-serif", minHeight:"100vh", fontSize:13 }}>
+
+      {/* HEADER */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"12px 20px", background:"#0d1220", borderBottom:"1px solid #1a2540", position:"sticky", top:0, zIndex:99 }}>
+        <div style={{ fontFamily:"monospace", fontSize:16, fontWeight:700, color:"#3b82f6", letterSpacing:1 }}>
+          CRYPTO<span style={{color:"#10b981"}}>SIGNAL</span> PRO
+        </div>
+        <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+          <span style={{ fontSize:10, color:"#10b981", fontFamily:"monospace", display:"flex", alignItems:"center", gap:4 }}>
+            <span style={{ width:6, height:6, background:"#10b981", borderRadius:"50%", display:"inline-block", animation:"pulse 1.5s infinite" }} />
+            LIVE
+          </span>
+          <button onClick={fetchAndAnalyze} disabled={scanning} style={{ padding:"7px 16px", background:scanning?"#065f46":"#10b981", color:"#000", border:"none", borderRadius:6, fontWeight:700, fontSize:12, cursor:"pointer" }}>
+            {scanning ? "⏳ Scanning..." : "⚡ SCAN NOW"}
+          </button>
+        </div>
+      </div>
+
+      {/* STATS */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", background:"#1a2540", gap:1 }}>
+        {[
+          { label:"WATCHING", val:coins.length, color:"#3b82f6" },
+          { label:"BUY",      val:buys,         color:"#10b981" },
+          { label:"SELL",     val:sells,        color:"#ef4444" },
+          { label:"SCANNED",  val:lastScan,     color:"#f59e0b" },
+        ].map((s,i) => (
+          <div key={i} style={{ background:"#0d1220", padding:"10px 16px", textAlign:"center" }}>
+            <div style={{ fontSize:9, color:"#4a6080", letterSpacing:2, fontFamily:"monospace" }}>{s.label}</div>
+            <div style={{ fontSize:20, fontWeight:700, fontFamily:"monospace", color:s.color, marginTop:2 }}>{s.val}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* BODY */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 320px", height:"calc(100vh - 108px)" }}>
+
+        {/* LEFT — COIN GRID */}
+        <div style={{ padding:14, overflowY:"auto" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
+            <span style={{ fontSize:10, color:"#4a6080", fontFamily:"monospace", letterSpacing:3 }}>MARKET SIGNALS</span>
+            <div style={{ display:"flex", gap:6 }}>
+              {["ALL","BUY","SELL"].map(f => (
+                <button key={f} onClick={()=>setFilter(f)} style={{ padding:"4px 12px", borderRadius:4, border:"1px solid", borderColor:filter===f?"#3b82f6":"#1a2540", background:filter===f?"#3b82f6":"transparent", color:filter===f?"white":"#4a6080", fontSize:11, cursor:"pointer" }}>{f}</button>
+              ))}
+            </div>
+          </div>
+
+          {coins.length === 0 ? (
+            <div style={{ textAlign:"center", color:"#4a6080", padding:40, fontFamily:"monospace" }}>
+              {scanning ? "⚡ Fetching real prices..." : "Click SCAN NOW to load signals"}
+            </div>
+          ) : (
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))", gap:10 }}>
+              {filtered.map(coin => {
+                const borderColor = coin.signal==="BUY" ? "#10b981" : coin.signal==="SELL" ? "#ef4444" : "#1a2540";
+                const chgColor    = parseFloat(coin.change24) >= 0 ? "#10b981" : "#ef4444";
+                return (
+                  <div key={coin.symbol} onClick={()=>{ setSelected(coin.symbol); setTab("detail"); }} style={{ background:"#0d1220", border:`1px solid ${selected===coin.symbol?"#3b82f6":"#1a2540"}`, borderLeft:`3px solid ${borderColor}`, borderRadius:10, padding:12, cursor:"pointer", transition:"all 0.2s" }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:8 }}>
+                      <div>
+                        <div style={{ fontWeight:700, fontFamily:"monospace", fontSize:14 }}>{coin.symbol}/USDT</div>
+                        <div style={{ fontFamily:"monospace", fontSize:12, marginTop:2 }}>${fmt(coin.price)}</div>
+                        <div style={{ fontSize:10, color:chgColor, marginTop:1 }}>{parseFloat(coin.change24)>=0?"▲":"▼"} {Math.abs(coin.change24)}% (24h)</div>
+                      </div>
+                      <span style={{ padding:"3px 8px", borderRadius:4, fontSize:10, fontWeight:700, fontFamily:"monospace", background:coin.signal==="BUY"?"#052e16":coin.signal==="SELL"?"#2d0000":"#1a2540", color:sigColor(coin.signal), border:`1px solid ${borderColor}` }}>
+                        {coin.signal}
+                      </span>
+                    </div>
+                    <MiniChart prices={coin.sparkline} signal={coin.signal} />
+                    <div style={{ display:"flex", gap:4, flexWrap:"wrap", marginTop:6 }}>
+                      {Object.entries(coin.signals||{}).map(([k,v]) => (
+                        <span key={k} style={{ fontSize:9, padding:"2px 6px", borderRadius:3, background:v===1?"#052e16":v===-1?"#2d0000":"#1a2540", color:indColor(v), fontFamily:"monospace" }}>{k}</span>
+                      ))}
+                    </div>
+                    <div style={{ display:"flex", alignItems:"center", gap:8, marginTop:8 }}>
+                      <span style={{ fontSize:9, color:"#4a6080", fontFamily:"monospace", minWidth:40 }}>SCORE</span>
+                      <div style={{ flex:1, height:3, background:"#1a2540", borderRadius:2, overflow:"hidden" }}>
+                        <div style={{ height:"100%", width:`${(coin.score/5)*100}%`, background:sigColor(coin.signal), borderRadius:2 }} />
+                      </div>
+                      <span style={{ fontSize:9, fontFamily:"monospace", color:sigColor(coin.signal) }}>{coin.score}/5</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* RIGHT SIDEBAR */}
+        <div style={{ borderLeft:"1px solid #1a2540", display:"flex", flexDirection:"column" }}>
+          <div style={{ display:"flex", borderBottom:"1px solid #1a2540" }}>
+            {["signals","telegram","detail"].map(t => (
+              <button key={t} onClick={()=>setTab(t)} style={{ flex:1, padding:10, background:"none", border:"none", borderBottom:tab===t?"2px solid #3b82f6":"2px solid transparent", color:tab===t?"#3b82f6":"#4a6080", fontSize:10, fontFamily:"monospace", cursor:"pointer", textTransform:"uppercase" }}>
+                {t}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ flex:1, overflowY:"auto", padding:12 }}>
+
+            {/* SIGNALS TAB */}
+            {tab==="signals" && (
+              history.length === 0
+                ? <div style={{ textAlign:"center", color:"#4a6080", fontFamily:"monospace", fontSize:11, padding:20 }}>No signals yet</div>
+                : history.map((h,i) => (
+                  <div key={i} style={{ background:"#080b14", border:"1px solid #1a2540", borderRadius:6, padding:10, marginBottom:8 }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", marginBottom:3 }}>
+                      <span style={{ fontWeight:700, fontFamily:"monospace", color:sigColor(h.signal) }}>{h.signal} {h.symbol}</span>
+                      <span style={{ fontSize:9, padding:"2px 6px", borderRadius:3, background:h.signal==="BUY"?"#052e16":"#2d0000", color:sigColor(h.signal), fontFamily:"monospace" }}>{h.signal}</span>
+                    </div>
+                    <div style={{ fontSize:11, color:"#4a6080" }}>Price: ${h.price} | Score: {h.score}/5</div>
+                    <div style={{ fontSize:10, color:"#2a3a5a", marginTop:2, fontFamily:"monospace" }}>{h.time}</div>
+                  </div>
+                ))
+            )}
+
+            {/* TELEGRAM TAB */}
+            {tab==="telegram" && (
+              <div>
+                <div style={{ background:"#080b14", border:"1px solid #1a2540", borderRadius:8, padding:12, marginBottom:10 }}>
+                  <div style={{ fontSize:12, color:"#3b82f6", fontFamily:"monospace", marginBottom:10, fontWeight:600 }}>📱 TELEGRAM SETUP</div>
+                  <input value={tgToken} onChange={e=>setTgToken(e.target.value)} placeholder="Bot Token (@BotFather)" style={{ width:"100%", background:"#0d1220", border:"1px solid #1a2540", borderRadius:6, padding:"8px 10px", color:"#e2e8f0", fontFamily:"monospace", fontSize:11, marginBottom:8, outline:"none", boxSizing:"border-box" }} />
+                  <input value={tgChatId} onChange={e=>setTgChatId(e.target.value)} placeholder="Chat ID (@userinfobot)" style={{ width:"100%", background:"#0d1220", border:"1px solid #1a2540", borderRadius:6, padding:"8px 10px", color:"#e2e8f0", fontFamily:"monospace", fontSize:11, marginBottom:8, outline:"none", boxSizing:"border-box" }} />
+                  <button onClick={testTelegram} style={{ width:"100%", padding:9, background:"#229ED9", border:"none", borderRadius:6, color:"white", fontWeight:700, fontSize:13, cursor:"pointer" }}>
+                    ✅ Save & Test
+                  </button>
+                  {tgStatus && <div style={{ fontSize:11, color:tgStatus.includes("✅")?"#10b981":"#ef4444", marginTop:8, fontFamily:"monospace" }}>{tgStatus}</div>}
+                </div>
+                <div style={{ background:"#080b14", border:"1px solid #1a2540", borderRadius:8, padding:12, marginTop:8, fontFamily:"monospace" }}>{tgStatus}</div>}
+                </div>
+                <div style={{ background:"#080b14", border:"1px solid #1a2540", borderRadius:8, padding:12, marginBottom:10 }}>
+                  <div style={{ fontSize:12, color:"#3b82f6", fontFamily:"monospace", marginBottom:8, fontWeight:600 }}>⏱ AUTO SCAN</div>
+                  <select value={autoMin} onChange={e=>setAutoMin(Number(e.target.value))} style={{ width:"100%", background:"#0d1220", border:"1px solid #1a2540", borderRadius:6, padding:"8px 10px", color:"#e2e8f0", fontFamily:"monospace", fontSize:11, outline:"none" }}>
+                    <option value={0}>Manual only</option>
+                    <option value={5}>Every 5 min</option>
+                    <option value={15}>Every 15 min</option>
+                    <option value={30}>Every 30 min</option>
+                    <option value={60}>Every 1 hour</option>
+                  </select>
+                </div>
+                <div style={{ background:"#080b14", border:"1px solid #1a2540", borderRadius:8, padding:12, fontSize:11, color:"#4a6080", fontFamily:"monospace", lineHeight:1.9 }}>
+                  <div style={{ color:"#3b82f6", marginBottom:6, fontWeight:600 }}>📋 SETUP GUIDE</div>
+                  1. Telegram → @BotFather<br/>
+                  2. /newbot → Token copy karo<br/>
+                  3. Tumhara Chat ID: <span style={{color:"#10b981"}}>8019333247</span><br/>
+                  4. Save & Test dabao<br/>
+                  5. Telegram check karo ✅
+                </div>
+              </div>
+            )}
+
+            {/* DETAIL TAB */}
+            {tab==="detail" && (
+              !sel
+                ? <div style={{ textAlign:"center", color:"#4a6080", fontFamily:"monospace", fontSize:11, padding:20 }}>Koi bhi coin card click karo</div>
+                : (
+                  <div style={{ background:"#080b14", border:"1px solid #1a2540", borderRadius:8, padding:12 }}>
+                    <div style={{ fontSize:14, fontWeight:700, fontFamily:"monospace", color:sigColor(sel.signal), marginBottom:12 }}>
+                      {sel.symbol}/USDT — {sel.signal}
+                    </div>
+                    {[
+                      ["Price",      `$${fmt(sel.price)}`],
+                      ["24h Change", `${sel.change24}%`],
+                      ["RSI (14)",   sel.rsi],
+                      ["Support",    `$${sel.support}`],
+                      ["Resistance", `$${sel.resistance}`],
+                      ["MA 20",      `$${sel.ma20}`],
+                      ["MA 50",      `$${sel.ma50}`],
+                      ["Score",      `${sel.score}/5`],
+                    ].map(([k,v]) => (
+                      <div key={k} style={{ display:"flex", justifyContent:"space-between", padding:"6px 0", borderBottom:"1px solid #1a2540", fontSize:12 }}>
+                        <span style={{ color:"#4a6080", fontFamily:"monospace" }}>{k}</span>
+                        <span style={{ fontFamily:"monospace", fontWeight:600 }}>{v}</span>
+                      </div>
+                    ))}
+                    <div style={{ marginTop:12, fontSize:10, color:"#4a6080", fontFamily:"monospace", marginBottom:6 }}>INDICATORS:</div>
+                    {Object.entries(sel.signals||{}).map(([k,v]) => (
+                      <div key={k} style={{ display:"flex", justifyContent:"space-between", padding:"5px 0", borderBottom:"1px solid #1a2540", fontSize:11 }}>
+                        <span style={{ color:"#4a6080", fontFamily:"monospace" }}>{k}</span>
+                        <span style={{ color:indColor(v), fontFamily:"monospace" }}>{indLabel(v)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* TOAST */}
+      {toast && (
+        <div style={{ position:"fixed", bottom:20, right:20, background:"#0d1220", border:"1px solid #10b981", borderRadius:8, padding:"10px 16px", fontSize:12, color:"#10b981", fontFamily:"monospace", zIndex:999 }}>
+          {toast}
+        </div>
+      )}
+    </div>
+  );
+}
